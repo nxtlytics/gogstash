@@ -11,6 +11,7 @@ import (
 	"github.com/tsaikd/gogstash/filter/ratelimit"
 	"github.com/tsaikd/gogstash/filter/removefield"
 	"github.com/tsaikd/gogstash/filter/typeconv"
+	"github.com/tsaikd/gogstash/input/analyticsjs"
 	"github.com/tsaikd/gogstash/input/dockerlog"
 	"github.com/tsaikd/gogstash/input/dockerstats"
 	"github.com/tsaikd/gogstash/input/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/tsaikd/gogstash/output/amqp"
 	"github.com/tsaikd/gogstash/output/elastic"
 	"github.com/tsaikd/gogstash/output/email"
+	"github.com/tsaikd/gogstash/output/kafka"
 	"github.com/tsaikd/gogstash/output/prometheus"
 	"github.com/tsaikd/gogstash/output/redis"
 	"github.com/tsaikd/gogstash/output/report"
@@ -29,6 +31,7 @@ import (
 )
 
 func init() {
+	config.RegistInputHandler(analyticsjs.ModuleName, analyticsjs.InitHandler)
 	config.RegistInputHandler(inputdockerlog.ModuleName, inputdockerlog.InitHandler)
 	config.RegistInputHandler(inputdockerstats.ModuleName, inputdockerstats.InitHandler)
 	config.RegistInputHandler(inputexec.ModuleName, inputexec.InitHandler)
@@ -51,6 +54,7 @@ func init() {
 	config.RegistOutputHandler(outputamqp.ModuleName, outputamqp.InitHandler)
 	config.RegistOutputHandler(outputelastic.ModuleName, outputelastic.InitHandler)
 	config.RegistOutputHandler(outputemail.ModuleName, outputemail.InitHandler)
+	config.RegistOutputHandler(outputkafka.ModuleName, outputkafka.InitHandler)
 	config.RegistOutputHandler(outputprometheus.ModuleName, outputprometheus.InitHandler)
 	config.RegistOutputHandler(outputredis.ModuleName, outputredis.InitHandler)
 	config.RegistOutputHandler(outputreport.ModuleName, outputreport.InitHandler)

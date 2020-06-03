@@ -1,17 +1,22 @@
 package cmd
 
 import (
+	"context"
 	"runtime"
-	"time"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/tsaikd/gogstash/config"
 
 	// module loader
 	_ "github.com/tsaikd/gogstash/modloader"
 )
 
-func gogstash(confpath string) (err error) {
+func gogstash(ctx context.Context, confpath string, debug bool) (err error) {
 	logger := config.Logger
+
+	if debug {
+		logger.Level = logrus.DebugLevel
+	}
 
 	if runtime.GOMAXPROCS(0) == 1 && runtime.NumCPU() > 1 {
 		logger.Warnf("set GOMAXPROCS = %d to get better performance", runtime.NumCPU())
@@ -22,20 +27,16 @@ func gogstash(confpath string) (err error) {
 		return
 	}
 
-	if err = conf.RunInputs(); err != nil {
+	if err = conf.Start(ctx); err != nil {
 		return
 	}
 
-	if err = conf.RunFilters(); err != nil {
+	logger.Info("gogstash started...")
+
+	// Check whether any goroutines failed.
+	if err = conf.Wait(); err != nil {
 		return
 	}
 
-	if err = conf.RunOutputs(); err != nil {
-		return
-	}
-
-	for {
-		// all event run in routine, go into infinite sleep
-		time.Sleep(1 * time.Hour)
-	}
+	return
 }

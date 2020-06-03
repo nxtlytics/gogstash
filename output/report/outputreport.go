@@ -1,19 +1,18 @@
 package outputreport
 
 import (
+	"context"
 	"fmt"
 	"time"
-
-	"github.com/Sirupsen/logrus"
 
 	"github.com/tsaikd/gogstash/config"
 	"github.com/tsaikd/gogstash/config/logevent"
 )
 
-const (
-	ModuleName = "report"
-)
+// ModuleName is the name used in config file
+const ModuleName = "report"
 
+// OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
 	Interval     int    `json:"interval,omitempty"`
@@ -23,6 +22,7 @@ type OutputConfig struct {
 	ProcessCount int `json:"-"`
 }
 
+// DefaultOutputConfig returns an OutputConfig struct with default values
 func DefaultOutputConfig() OutputConfig {
 	return OutputConfig{
 		OutputConfig: config.OutputConfig{
@@ -35,34 +35,44 @@ func DefaultOutputConfig() OutputConfig {
 	}
 }
 
-func InitHandler(confraw *config.ConfigRaw, logger *logrus.Logger) (retconf config.TypeOutputConfig, err error) {
+// InitHandler initialize the output plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
 	conf := DefaultOutputConfig()
-	if err = config.ReflectConfig(confraw, &conf); err != nil {
-		return
+	if err := config.ReflectConfig(raw, &conf); err != nil {
+		return nil, err
 	}
 
-	go conf.ReportLoop(logger)
+	go conf.reportLoop(ctx)
 
-	retconf = &conf
-	return
+	return &conf, nil
 }
 
-func (t *OutputConfig) Event(event logevent.LogEvent) (err error) {
+// Output event
+func (t *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	t.ProcessCount++
 	return
 }
 
-func (t *OutputConfig) ReportLoop(logger *logrus.Logger) (err error) {
+func (t *OutputConfig) reportLoop(ctx context.Context) (err error) {
+	startChan := make(chan bool, 1) // startup tick
+	ticker := time.NewTicker(time.Duration(t.Interval) * time.Second)
+	defer ticker.Stop()
+
+	startChan <- true
+
 	for {
-		if err = t.Report(logger); err != nil {
-			logger.Errorln(fmt.Sprintf("ReportLoop failed: %v", err))
-			return
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-startChan:
+			t.report()
+		case <-ticker.C:
+			t.report()
 		}
-		time.Sleep(time.Duration(t.Interval) * time.Second)
 	}
 }
 
-func (t *OutputConfig) Report(logger *logrus.Logger) (err error) {
+func (t *OutputConfig) report() {
 	if t.ProcessCount > 0 {
 		fmt.Printf(
 			"%s %sProcess %d events\n",

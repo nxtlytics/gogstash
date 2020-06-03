@@ -13,30 +13,6 @@ Logstash like, written in golang
 curl 'https://github.com/tsaikd/gogstash/releases/download/0.1.8/gogstash-Linux-x86_64' -SLo gogstash && chmod +x gogstash
 ```
 
-* Configure for nginx.json (example)
-```
-{
-	"input": [
-		{
-			"type": "file",
-			"path": "/var/log/nginx/access.log",
-			"start_position": "beginning",
-			"sincedb_path": ".sincedb.nginx.json"
-		}
-	],
-	"output": [
-		{
-			"type": "report"
-		},
-		{
-			"type": "redis",
-			"key": "gogstash-nginx-%{host}",
-			"host": ["127.0.0.1:6379"]
-		}
-	]
-}
-```
-
 * Configure for ubuntu-sys.json (example)
 ```
 {
@@ -111,6 +87,57 @@ curl 'https://github.com/tsaikd/gogstash/releases/download/0.1.8/gogstash-Linux-
 }
 ```
 
+* Config format with YAML for dockerstats.json (example)
+```
+input:
+  - type: dockerstats
+output:
+  - type: report
+  - type: redis
+    key: "gogstash-docker-%{host}"
+    host:
+      - "127.0.0.1:6379"
+```
+
+* Configure for nginx.yml with gonx filter (example)
+
+```yml
+input:
+  - type: redis
+    host: redis.server:6379
+    key:  filebeat-nginx
+    connections: 1
+
+filter:
+  - type: gonx
+    format: '$clientip - $auth [$time_local] "$full_request" $response $bytes "$referer" "$agent"'
+    source: message
+  - type: gonx
+    format: '$verb $request HTTP/$httpversion'
+    source: full_request
+  - type: date
+    format: "02/Jan/2006:15:04:05 -0700"
+    source: time_local
+  - type: remove_field
+    fields: ["full_request", "time_local"]
+  - type: add_field
+    key: host
+    value: "%{beat.hostname}"
+  - type: geoip2
+    db_path: "GeoLite2-City.mmdb"
+    ip_field: clientip
+    key: req_geo
+  - type: typeconv
+    conv_type: int64
+    fields: ["bytes", "response"]
+
+output:
+  - type: elastic
+    url: "http://elastic.server:9200"
+    index: "log-nginx-%{+@2006-01-02}"
+    document_type: "%{type}"
+```
+
 * Run gogstash for nginx example (command line)
 ```
 GOMAXPROCS=4 ./gogstash --CONFIG nginx.json
@@ -129,22 +156,40 @@ docker run -it --rm \
 
 ## Supported inputs
 
-See [input module](input) for more information
+See [input modules](input) for more information
 
 * [docker log](input/dockerlog)
 * [docker stats](input/dockerstats)
 * [exec](input/exec)
 * [file](input/file)
 * [http](input/http)
+* [httplisten](input/httplisten)
+* [redis](input/redis)
 * [socket](input/socket)
+
+## Supported filters
+
+See [filter modules](filter) for more information
+
+* [add field](filter/addfield)
+* [date](filter/date)
+* [geoip2](filter/geoip2)
+* [gonx](filter/gonx)
+* [grok](filter/grok)
+* [json](filter/json)
+* [rate limit](filter/ratelimit)
+* [remove field](filter/removefield)
+* [typeconv](filter/typeconv)
 
 ## Supported outputs
 
-See [output module](output) for more information
+See [output modules](output) for more information
 
 * [amqp](output/amqp)
 * [elastic](output/elastic)
+* [email](output/email)
+* [prometheus](output/prometheus)
 * [redis](output/redis)
 * [report](output/report)
+* [socket](output/socket)
 * [stdout](output/stdout)
-* [email](output/email)

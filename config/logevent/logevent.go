@@ -73,23 +73,38 @@ func (t LogEvent) Get(field string) (v interface{}) {
 	return
 }
 
-func (t LogEvent) GetString(field string) (v string) {
+func (t LogEvent) GetString(field string) string {
 	switch field {
 	case "@timestamp":
-		v = t.Timestamp.UTC().Format(timeFormat)
+		return t.Timestamp.UTC().Format(timeFormat)
 	case "message":
-		v = t.Message
+		return t.Message
 	default:
-		if value, ok := t.Extra[field]; ok {
-			v = fmt.Sprintf("%v", value)
-		}
+		return getStringFromObject(t.Extra, field)
 	}
-	return
+}
+
+func getStringFromObject(obj map[string]interface{}, field string) string {
+	fieldSplits := strings.Split(field, ".")
+	if len(fieldSplits) < 2 {
+		if value, ok := obj[field]; ok {
+			return fmt.Sprintf("%v", value)
+		}
+		return ""
+	}
+
+	switch child := obj[fieldSplits[0]].(type) {
+	case map[string]interface{}:
+		return getStringFromObject(child, strings.Join(fieldSplits[1:], "."))
+	default:
+		return fmt.Sprintf("%v", child)
+	}
 }
 
 var (
-	retime = regexp.MustCompile(`%{\+([^}]+)}`)
-	revar  = regexp.MustCompile(`%{([\w@]+)}`)
+	reCurrentTime = regexp.MustCompile(`%{\+([^}]+)}`)
+	reEventTime   = regexp.MustCompile(`%{\+@([^}]+)}`)
+	revar         = regexp.MustCompile(`%{([\w@\.]+)}`)
 )
 
 // FormatWithEnv format string with environment value, ex: %{HOSTNAME}
@@ -102,19 +117,36 @@ func FormatWithEnv(text string) (result string) {
 		value := os.Getenv(field)
 		if value != "" {
 			result = strings.Replace(result, submatches[0], value, -1)
+		} else if field == "HOSTNAME" {
+			if value, _ := os.Hostname(); value != "" {
+				result = strings.Replace(result, submatches[0], value, -1)
+			}
 		}
 	}
 
 	return
 }
 
-// FormatWithTime format string with current time, ex: %{+2006-01-02}
-func FormatWithTime(text string) (result string) {
+// FormatWithCurrentTime format string with current time, ex: %{+2006-01-02}
+func FormatWithCurrentTime(text string) (result string) {
 	result = text
 
-	matches := retime.FindAllStringSubmatch(result, -1)
+	matches := reCurrentTime.FindAllStringSubmatch(result, -1)
 	for _, submatches := range matches {
 		value := time.Now().Format(submatches[1])
+		result = strings.Replace(result, submatches[0], value, -1)
+	}
+
+	return
+}
+
+// FormatWithEventTime format string with event time, ex: %{+@2006-01-02}
+func FormatWithEventTime(text string, evevtTime time.Time) (result string) {
+	result = text
+
+	matches := reEventTime.FindAllStringSubmatch(result, -1)
+	for _, submatches := range matches {
+		value := evevtTime.Format(submatches[1])
 		result = strings.Replace(result, submatches[0], value, -1)
 	}
 
@@ -125,7 +157,8 @@ func FormatWithTime(text string) (result string) {
 func (t LogEvent) Format(format string) (out string) {
 	out = format
 
-	out = FormatWithTime(out)
+	out = FormatWithEventTime(out, t.Timestamp)
+	out = FormatWithCurrentTime(out)
 
 	matches := revar.FindAllStringSubmatch(out, -1)
 	for _, submatches := range matches {

@@ -1,139 +1,146 @@
 package config
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"io/ioutil"
+	"os"
+	"path/filepath"
 	"reflect"
-	"regexp"
+	"strings"
+	"time"
 
-	"github.com/codegangsta/inject"
 	"github.com/tsaikd/KDGoLib/errutil"
-	"github.com/tsaikd/KDGoLib/injectutil"
 	"github.com/tsaikd/gogstash/config/logevent"
+	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v2"
 )
 
 // errors
 var (
-	ErrorReadConfigFile1 = errutil.NewFactory("Failed to read config file: %q")
-	ErrorUnmarshalConfig = errutil.NewFactory("Failed unmarshalling config json")
+	ErrorReadConfigFile1     = errutil.NewFactory("Failed to read config file: %q")
+	ErrorUnmarshalJSONConfig = errutil.NewFactory("Failed unmarshalling config in JSON format")
+	ErrorUnmarshalYAMLConfig = errutil.NewFactory("Failed unmarshalling config in YAML format")
+	ErrorTimeout1            = errutil.NewFactory("timeout: %v")
 )
 
+// Config contains all config
 type Config struct {
-	inject.Injector `json:"-"`
-	InputRaw        []ConfigRaw `json:"input,omitempty"`
-	FilterRaw       []ConfigRaw `json:"filter,omitempty"`
-	OutputRaw       []ConfigRaw `json:"output,omitempty"`
+	InputRaw  []ConfigRaw `json:"input,omitempty" yaml:"input"`
+	FilterRaw []ConfigRaw `json:"filter,omitempty" yaml:"filter"`
+	OutputRaw []ConfigRaw `json:"output,omitempty" yaml:"output"`
+
+	// channel size: chInFilter, chFilterOut, chOutDebug
+	ChannelSize int `json:"chsize,omitempty" yaml:"chsize"`
+
+	// enable debug channel, used for testing
+	DebugChannel bool `json:"debugch,omitempty" yaml:"debugch"`
+
+	chInFilter  MsgChan // channel from input to filter
+	chFilterOut MsgChan // channel from filter to output
+	chOutDebug  MsgChan // channel from output to debug
+	ctx         context.Context
+	eg          *errgroup.Group
 }
 
-type InChan chan logevent.LogEvent
-type OutChan chan logevent.LogEvent
+var defaultConfig = Config{
+	ChannelSize: 100,
+}
 
+// MsgChan message channel type
+type MsgChan chan logevent.LogEvent
+
+// LoadFromFile load config from filepath
 func LoadFromFile(path string) (config Config, err error) {
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
-		err = ErrorReadConfigFile1.New(err, path)
-		return
+		return config, ErrorReadConfigFile1.New(err, path)
 	}
 
-	return LoadFromData(data)
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".yml", ".yaml":
+		return LoadFromYAML(data)
+	default:
+		return LoadFromJSON(data)
+	}
 }
 
-func LoadFromString(text string) (config Config, err error) {
-	return LoadFromData([]byte(text))
-}
-
-func LoadFromData(data []byte) (config Config, err error) {
-	if data, err = CleanComments(data); err != nil {
+// LoadFromJSON load config from []byte in JSON format
+func LoadFromJSON(data []byte) (config Config, err error) {
+	if data, err = cleanComments(data); err != nil {
 		return
 	}
 
 	if err = json.Unmarshal(data, &config); err != nil {
-		err = ErrorUnmarshalConfig.New(err)
-		return
+		return config, ErrorUnmarshalJSONConfig.New(err)
 	}
 
-	config.Injector = inject.New()
-	config.Map(Logger)
+	initConfig(&config)
+	return
+}
 
-	inchan := make(InChan, 100)
-	outchan := make(OutChan, 100)
-	config.Map(inchan)
-	config.Map(outchan)
+// LoadFromYAML load config from []byte in YAML format
+func LoadFromYAML(data []byte) (config Config, err error) {
+	if err = yaml.Unmarshal(data, &config); err != nil {
+		return config, ErrorUnmarshalYAMLConfig.New(err)
+	}
+	initConfig(&config)
+	return
+}
 
+func initConfig(config *Config) {
 	rv := reflect.ValueOf(&config)
 	formatReflect(rv)
 
-	return
+	if config.ChannelSize < 1 {
+		config.ChannelSize = defaultConfig.ChannelSize
+	}
+	config.chInFilter = make(MsgChan, config.ChannelSize)
+	config.chFilterOut = make(MsgChan, config.ChannelSize)
+	if config.DebugChannel {
+		config.chOutDebug = make(MsgChan, config.ChannelSize)
+	}
 }
 
-func ReflectConfig(confraw *ConfigRaw, conf interface{}) (err error) {
-	data, err := json.Marshal(confraw)
-	if err != nil {
+// Start config in goroutines
+func (t *Config) Start(ctx context.Context) (err error) {
+	ctx = contextWithOSSignal(ctx, Logger, os.Interrupt, os.Kill)
+	t.eg, t.ctx = errgroup.WithContext(ctx)
+
+	if err = t.startInputs(); err != nil {
 		return
 	}
-
-	if err = json.Unmarshal(data, conf); err != nil {
+	if err = t.startFilters(); err != nil {
 		return
 	}
-
-	rv := reflect.ValueOf(conf).Elem()
-	formatReflect(rv)
-
-	return
-}
-
-func formatReflect(rv reflect.Value) {
-	if !rv.IsValid() {
+	if err = t.startOutputs(); err != nil {
 		return
 	}
-
-	switch rv.Kind() {
-	case reflect.Ptr:
-		if !rv.IsNil() {
-			formatReflect(rv.Elem())
-		}
-	case reflect.Struct:
-		for i := 0; i < rv.NumField(); i++ {
-			field := rv.Field(i)
-			formatReflect(field)
-		}
-	case reflect.String:
-		if !rv.CanSet() {
-			return
-		}
-		value := rv.Interface().(string)
-		value = logevent.FormatWithEnv(value)
-		rv.SetString(value)
-	}
-}
-
-// CleanComments used for remove non-standard json comments.
-// Supported comment formats
-// format 1: ^\s*#
-// format 2: ^\s*//
-func CleanComments(data []byte) (out []byte, err error) {
-	reForm1 := regexp.MustCompile(`^\s*#`)
-	reForm2 := regexp.MustCompile(`^\s*//`)
-	data = bytes.Replace(data, []byte("\r"), []byte(""), 0) // Windows
-	lines := bytes.Split(data, []byte("\n"))
-	var filtered [][]byte
-
-	for _, line := range lines {
-		if reForm1.Match(line) {
-			continue
-		}
-		if reForm2.Match(line) {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-
-	out = bytes.Join(filtered, []byte("\n"))
 	return
 }
 
-func (t *Config) InvokeSimple(arg interface{}) (err error) {
-	_, err = injectutil.Invoke(t.Injector, arg)
-	return
+// Wait blocks until all filters returned, then
+// returns the first non-nil error (if any) from them.
+func (t *Config) Wait() (err error) {
+	return t.eg.Wait()
+}
+
+// TestInputEvent send an event to chInFilter, used for testing
+func (t *Config) TestInputEvent(event logevent.LogEvent) {
+	t.chInFilter <- event
+}
+
+// TestGetOutputEvent get an event from chOutDebug, used for testing
+func (t *Config) TestGetOutputEvent(timeout time.Duration) (event logevent.LogEvent, err error) {
+	ctx, cancel := context.WithTimeout(t.ctx, timeout)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return
+	case ev := <-t.chOutDebug:
+		return ev, nil
+	case <-time.After(timeout + 10*time.Millisecond):
+		return event, ErrorTimeout1.New(nil, timeout)
+	}
 }

@@ -1,6 +1,7 @@
 package outputemail
 
 import (
+	"context"
 	"crypto/tls"
 	"strings"
 
@@ -9,12 +10,10 @@ import (
 	"gopkg.in/gomail.v2"
 )
 
-// ModuleName the module name of this plugin
-const (
-	ModuleName = "email"
-)
+// ModuleName is the name used in config file
+const ModuleName = "email"
 
-// OutputConfig the default output config
+// OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
 	Address     string   `json:"address"`
@@ -29,7 +28,7 @@ type OutputConfig struct {
 	Password    string   `json:"password"`
 }
 
-// DefaultOutputConfig build the default output config
+// DefaultOutputConfig returns an OutputConfig struct with default values
 func DefaultOutputConfig() OutputConfig {
 	return OutputConfig{
 		OutputConfig: config.OutputConfig{
@@ -46,19 +45,18 @@ func DefaultOutputConfig() OutputConfig {
 	}
 }
 
-// InitHandler init the handler
-func InitHandler(confraw *config.ConfigRaw) (retconf config.TypeOutputConfig, err error) {
+// InitHandler initialize the output plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
 	conf := DefaultOutputConfig()
-	if err = config.ReflectConfig(confraw, &conf); err != nil {
-		return
+	if err := config.ReflectConfig(raw, &conf); err != nil {
+		return nil, err
 	}
 
-	retconf = &conf
-	return
+	return &conf, nil
 }
 
-// Event the main log event
-func (t *OutputConfig) Event(event logevent.LogEvent) (err error) {
+// Output event
+func (t *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	message := gomail.NewMessage()
 	message.SetHeader("From", t.From)
 	message.SetHeader("To", strings.Split(t.To, ";")...)

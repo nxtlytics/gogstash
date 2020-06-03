@@ -3,7 +3,7 @@ package inputfile
 import (
 	"bufio"
 	"bytes"
-	"fmt"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,14 +13,16 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/go-fsnotify/fsnotify"
 	"github.com/tsaikd/KDGoLib/errutil"
+	"github.com/tsaikd/KDGoLib/futil"
 	"github.com/tsaikd/gogstash/config"
 	"github.com/tsaikd/gogstash/config/logevent"
+	"golang.org/x/sync/errgroup"
 )
 
-const (
-	ModuleName = "file"
-)
+// ModuleName is the name used in config file
+const ModuleName = "file"
 
+// InputConfig holds the configuration json fields and internal objects
 type InputConfig struct {
 	config.InputConfig
 	Path                 string `json:"path"`
@@ -28,12 +30,13 @@ type InputConfig struct {
 	SinceDBPath          string `json:"sincedb_path,omitempty"`
 	SinceDBWriteInterval int    `json:"sincedb_write_interval,omitempty"`
 
-	hostname            string                  `json:"-"`
+	hostname            string
 	SinceDBInfos        map[string]*SinceDBInfo `json:"-"`
-	sinceDBLastInfosRaw []byte                  `json:"-"`
-	SinceDBLastSaveTime time.Time               `json:"-"`
+	sinceDBLastInfosRaw []byte
+	SinceDBLastSaveTime time.Time `json:"-"`
 }
 
+// DefaultInputConfig returns an InputConfig struct with default values
 func DefaultInputConfig() InputConfig {
 	return InputConfig{
 		InputConfig: config.InputConfig{
@@ -49,52 +52,60 @@ func DefaultInputConfig() InputConfig {
 	}
 }
 
-func InitHandler(confraw *config.ConfigRaw) (retconf config.TypeInputConfig, err error) {
+// errors
+var (
+	ErrorGlobFailed1 = errutil.NewFactory("glob(%q) failed")
+)
+
+// InitHandler initialize the input plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeInputConfig, error) {
 	conf := DefaultInputConfig()
-	if err = config.ReflectConfig(confraw, &conf); err != nil {
-		return
+	err := config.ReflectConfig(raw, &conf)
+	if err != nil {
+		return nil, err
 	}
 
 	if conf.hostname, err = os.Hostname(); err != nil {
-		return
+		return nil, err
 	}
 
-	retconf = &conf
-	return
+	conf.Codec, err = config.GetCodec(ctx, *raw)
+	if err != nil {
+		return nil, err
+	}
+	if conf.Codec == nil {
+		conf.Codec, _ = config.DefaultCodecInitHandler(nil, nil)
+	}
+
+	return &conf, nil
 }
 
-func (t *InputConfig) Start() {
-	t.Invoke(t.start)
-}
-
-func (t *InputConfig) start(logger *logrus.Logger, inchan config.InChan) (err error) {
-	defer func() {
-		if err != nil {
-			logger.Errorln(err)
-		}
-	}()
-
-	var (
-		matches []string
-		fi      os.FileInfo
-	)
+// Start wraps the actual function starting the plugin
+func (t *InputConfig) Start(ctx context.Context, msgChan chan<- logevent.LogEvent) (err error) {
+	logger := config.Logger
 
 	if err = t.LoadSinceDBInfos(); err != nil {
 		return
 	}
 
-	if matches, err = filepath.Glob(t.Path); err != nil {
-		return errutil.NewErrors(fmt.Errorf("glob(%q) failed", t.Path), err)
+	matches, err := filepath.Glob(t.Path)
+	if err != nil {
+		return ErrorGlobFailed1.New(err, t.Path)
 	}
 
-	go t.CheckSaveSinceDBInfosLoop()
+	eg, ctx := errgroup.WithContext(ctx)
+
+	eg.Go(func() error {
+		return t.CheckSaveSinceDBInfosLoop(ctx)
+	})
 
 	for _, fpath := range matches {
-		if fpath, err = filepath.EvalSymlinks(fpath); err != nil {
+		if fpath, err = evalSymlinks(ctx, fpath); err != nil {
 			logger.Errorf("Get symlinks failed: %q\n%v", fpath, err)
 			continue
 		}
 
+		var fi os.FileInfo
 		if fi, err = os.Stat(fpath); err != nil {
 			logger.Errorf("stat(%q) failed\n%s", t.Path, err)
 			continue
@@ -105,19 +116,26 @@ func (t *InputConfig) start(logger *logrus.Logger, inchan config.InChan) (err er
 			continue
 		}
 
-		readEventChan := make(chan fsnotify.Event, 10)
-		go t.fileReadLoop(readEventChan, fpath, logger, inchan)
-		go t.fileWatchLoop(readEventChan, fpath, fsnotify.Create|fsnotify.Write)
+		func(fpath string) {
+			readEventChan := make(chan fsnotify.Event, 10)
+			eg.Go(func() error {
+				return t.fileReadLoop(ctx, readEventChan, fpath, logger, msgChan)
+			})
+			eg.Go(func() error {
+				return t.fileWatchLoop(ctx, readEventChan, fpath, fsnotify.Create|fsnotify.Write)
+			})
+		}(fpath)
 	}
 
-	return
+	return eg.Wait()
 }
 
 func (t *InputConfig) fileReadLoop(
+	ctx context.Context,
 	readEventChan chan fsnotify.Event,
 	fpath string,
 	logger *logrus.Logger,
-	inchan config.InChan,
+	msgChan chan<- logevent.LogEvent,
 ) (err error) {
 	var (
 		since     *SinceDBInfo
@@ -132,7 +150,7 @@ func (t *InputConfig) fileReadLoop(
 		buffer = &bytes.Buffer{}
 	)
 
-	if fpath, err = filepath.EvalSymlinks(fpath); err != nil {
+	if fpath, err = evalSymlinks(ctx, fpath); err != nil {
 		logger.Errorf("Get symlinks failed: %q\n%v", fpath, err)
 		return
 	}
@@ -170,7 +188,13 @@ func (t *InputConfig) fileReadLoop(
 	}
 
 	for {
-		if line, size, err = readline(reader, buffer); err != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if line, size, err = readline(ctx, reader, buffer); err != nil {
 			if err == io.EOF {
 				watchev := <-readEventChan
 				logger.Debug("fileReadLoop recv:", watchev)
@@ -201,36 +225,44 @@ func (t *InputConfig) fileReadLoop(
 			}
 		}
 
-		event := logevent.LogEvent{
-			Timestamp: time.Now(),
-			Message:   line,
-			Extra: map[string]interface{}{
+		_, err := t.Codec.Decode(ctx, []byte(line),
+			map[string]interface{}{
 				"host":   t.hostname,
 				"path":   fpath,
 				"offset": since.Offset,
 			},
+			msgChan)
+
+		if err == nil {
+			since.Offset += int64(size)
+
+			//loggfer.Debugf("%q %v", event.Message, event)
+			//msgChan <- event
+
+			//self.SaveSinceDBInfos()
+			t.CheckSaveSinceDBInfos()
+		} else {
+			logger.Errorf("Failed to decode %v using codec %v", line, t.Codec)
 		}
-
-		since.Offset += int64(size)
-
-		logger.Debugf("%q %v", event.Message, event)
-		inchan <- event
-		//self.SaveSinceDBInfos()
-		t.CheckSaveSinceDBInfos()
 	}
 }
 
-func (self *InputConfig) fileWatchLoop(readEventChan chan fsnotify.Event, fpath string, op fsnotify.Op) (err error) {
+func (self *InputConfig) fileWatchLoop(ctx context.Context, readEventChan chan fsnotify.Event, fpath string, op fsnotify.Op) (err error) {
 	var (
 		event fsnotify.Event
 	)
 	for {
-		if event, err = waitWatchEvent(fpath, op); err != nil {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		if event, err = waitWatchEvent(ctx, fpath, op); err != nil {
 			return
 		}
 		readEventChan <- event
 	}
-	return
 }
 
 func isFileTruncated(fp *os.File, since *SinceDBInfo) (truncated bool, err error) {
@@ -264,12 +296,18 @@ func openfile(fpath string, offset int64, whence int) (fp *os.File, reader *bufi
 	return
 }
 
-func readline(reader *bufio.Reader, buffer *bytes.Buffer) (line string, size int, err error) {
+func readline(ctx context.Context, reader *bufio.Reader, buffer *bytes.Buffer) (line string, size int, err error) {
 	var (
 		segment []byte
 	)
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		if segment, err = reader.ReadBytes('\n'); err != nil {
 			if err != io.EOF {
 				err = errutil.New("read line failed", err)
@@ -292,8 +330,6 @@ func readline(reader *bufio.Reader, buffer *bytes.Buffer) (line string, size int
 			return
 		}
 	}
-
-	return
 }
 
 func isPartialLine(segment []byte) bool {
@@ -310,14 +346,14 @@ var (
 	mapWatcher = map[string]*fsnotify.Watcher{}
 )
 
-func waitWatchEvent(fpath string, op fsnotify.Op) (event fsnotify.Event, err error) {
+func waitWatchEvent(ctx context.Context, fpath string, op fsnotify.Op) (event fsnotify.Event, err error) {
 	var (
 		fdir    string
 		watcher *fsnotify.Watcher
 		ok      bool
 	)
 
-	if fpath, err = filepath.EvalSymlinks(fpath); err != nil {
+	if fpath, err = evalSymlinks(ctx, fpath); err != nil {
 		err = errutil.New("Get symlinks failed: "+fpath, err)
 		return
 	}
@@ -339,6 +375,8 @@ func waitWatchEvent(fpath string, op fsnotify.Op) (event fsnotify.Event, err err
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case event = <-watcher.Events:
 			if event.Name == fpath {
 				if op > 0 {
@@ -354,6 +392,25 @@ func waitWatchEvent(fpath string, op fsnotify.Op) (event fsnotify.Event, err err
 			return
 		}
 	}
+}
 
-	return
+func evalSymlinks(ctx context.Context, path string) (string, error) {
+	// https://github.com/tsaikd/gogstash/issues/30
+	for retry := 5; retry > 0; retry-- {
+		if futil.IsExist(path) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return path, nil
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	if futil.IsNotExist(path) {
+		return path, os.ErrNotExist
+	}
+
+	return filepath.EvalSymlinks(path)
 }

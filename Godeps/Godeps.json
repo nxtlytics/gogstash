@@ -1,14 +1,10 @@
 {
 	"ImportPath": "github.com/tsaikd/gogstash",
-	"GoVersion": "go1.7",
+	"GoVersion": "go1.9",
 	"Deps": [
 		{
 			"ImportPath": "github.com/fsouza/go-dockerclient",
-			"Rev": "ccd3bf13554df0fc1527a78e3ff2bbde5e2a266f"
-		},
-		{
-			"ImportPath": "github.com/fzzy/radix",
-			"Rev": "3528e87a910c6730810cec1be187f989d7d9442a"
+			"Rev": "e24e809e9db395f1e3c85af1b88f2002023610f5"
 		},
 		{
 			"ImportPath": "github.com/go-fsnotify/fsnotify",
@@ -16,11 +12,7 @@
 		},
 		{
 			"ImportPath": "github.com/tsaikd/KDGoLib",
-			"Rev": "ee45efca130e9bfbd379e9981b4fd29fed34dd97"
-		},
-		{
-			"ImportPath": "gopkg.in/olivere/elastic.v3",
-			"Rev": "787ebbb5a7600662bca364e4e8ca959f315e442f"
+			"Rev": "791fddc3aebc99a730fc4f9adc503b025937da41"
 		}
 	]
 }

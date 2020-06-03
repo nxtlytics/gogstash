@@ -1,20 +1,22 @@
 package outputstdout
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/tsaikd/gogstash/config"
 	"github.com/tsaikd/gogstash/config/logevent"
 )
 
-const (
-	ModuleName = "stdout"
-)
+// ModuleName is the name used in config file
+const ModuleName = "stdout"
 
+// OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
 }
 
+// DefaultOutputConfig returns an OutputConfig struct with default values
 func DefaultOutputConfig() OutputConfig {
 	return OutputConfig{
 		OutputConfig: config.OutputConfig{
@@ -25,17 +27,19 @@ func DefaultOutputConfig() OutputConfig {
 	}
 }
 
-func InitHandler(confraw *config.ConfigRaw) (retconf config.TypeOutputConfig, err error) {
+// InitHandler initialize the output plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
 	conf := DefaultOutputConfig()
-	if err = config.ReflectConfig(confraw, &conf); err != nil {
-		return
+	err := config.ReflectConfig(raw, &conf)
+	if err != nil {
+		return nil, err
 	}
 
-	retconf = &conf
-	return
+	return &conf, nil
 }
 
-func (t *OutputConfig) Event(event logevent.LogEvent) (err error) {
+// Output event
+func (t *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	raw, err := event.MarshalIndent()
 	if err != nil {
 		return

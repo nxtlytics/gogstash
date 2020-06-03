@@ -1,19 +1,18 @@
 package outputprometheus
 
 import (
+	"context"
 	"net/http"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/tsaikd/gogstash/config"
 	"github.com/tsaikd/gogstash/config/logevent"
 )
 
-const (
-	ModuleName = "prometheus"
-)
+// ModuleName is the name used in config file
+const ModuleName = "prometheus"
 
+// OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
 	Address string `json:"address,omitempty"`
@@ -21,6 +20,7 @@ type OutputConfig struct {
 	MsgCount prometheus.Counter `json:"-"`
 }
 
+// DefaultOutputConfig returns an OutputConfig struct with default values
 func DefaultOutputConfig() OutputConfig {
 	return OutputConfig{
 		OutputConfig: config.OutputConfig{
@@ -36,25 +36,32 @@ func DefaultOutputConfig() OutputConfig {
 	}
 }
 
-func InitHandler(confraw *config.ConfigRaw, logger *logrus.Logger) (retconf config.TypeOutputConfig, err error) {
+// InitHandler initialize the output plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
 	conf := DefaultOutputConfig()
-	if err = config.ReflectConfig(confraw, &conf); err != nil {
-		return
+	if err := config.ReflectConfig(raw, &conf); err != nil {
+		return nil, err
 	}
 
-	prometheus.MustRegister(conf.MsgCount)
-	go conf.serveHTTP(logger)
+	if err := prometheus.Register(conf.MsgCount); err != nil {
+		return nil, err
+	}
+	go conf.serveHTTP()
 
-	retconf = &conf
-	return
+	return &conf, nil
 }
 
-func (o *OutputConfig) Event(event logevent.LogEvent) (err error) {
+// Output event
+func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	o.MsgCount.Inc()
 	return
 }
 
-func (o *OutputConfig) serveHTTP(logger *logrus.Logger) {
+func (o *OutputConfig) serveHTTP() {
+	logger := config.Logger
 	http.Handle("/metrics", prometheus.Handler())
-	http.ListenAndServe(o.Address, nil)
+	logger.Infof("Listen %s", o.Address)
+	if err := http.ListenAndServe(o.Address, nil); err != nil {
+		logger.Fatal(err)
+	}
 }

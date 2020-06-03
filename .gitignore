@@ -1,1 +1,8 @@
+/filter/geoip2/GeoLite2-City.mmdb
 /gogstash
+/config.json
+/config.yaml
+/config.yml
+
+.idea
+*.i*
